@@ -3,39 +3,38 @@
 from .document import Document
 from .environment import Environment
 from .evaluator import evaluate
-from .model import (
+from .values import (
     Empty,
-    Entity,
-    EnumKind,
-    PrimitiveKind,
-    TypeDef,
     Value,
+    VBool,
     VDate,
-    VDict,
     VEntity,
     VEnum,
     VList,
     VNumber,
-    VRef,
     VText,
+    _Empty,
 )
+from .typedef import TypeDef, MemberDef
+from .sobject import SObject, SEntry
+from .errors import STNCoreError
 
 __all__ = [
     "evaluate",
     "Document",
     "Environment",
     "Empty",
-    "Entity",
-    "EnumKind",
-    "PrimitiveKind",
-    "TypeDef",
     "Value",
+    "VBool",
     "VDate",
-    "VDict",
     "VEntity",
     "VEnum",
     "VList",
     "VNumber",
-    "VRef",
     "VText",
+    "TypeDef",
+    "MemberDef",
+    "SObject",
+    "SEntry",
+    "STNCoreError",
 ]

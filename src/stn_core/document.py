@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .environment import Environment
-from .model import TypeDef, Value
+from .values import Value
+from .typedef import TypeDef
 
 
 @dataclass
@@ -15,15 +16,13 @@ class Document:
     environment: Environment = field(default_factory=Environment)
     results: list[Value] = field(default_factory=list)
 
-    # -- Convenience accessors ------------------------------------------
-
-    @property
-    def globals_(self) -> dict[str, Value]:
-        return self.environment.globals_
-
     @property
     def locals_(self) -> dict[str, Value]:
         return self.environment.locals_
+
+    @property
+    def publics(self) -> dict[str, Value]:
+        return self.environment.publics
 
     @property
     def typedefs(self) -> dict[str, TypeDef]:

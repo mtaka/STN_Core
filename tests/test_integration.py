@@ -1,125 +1,118 @@
-"""Integration tests: stn.parse() → stn_core.evaluate() → Document."""
+"""End-to-end integration tests."""
 
-import stn
-from stn_core import Empty, evaluate, VEntity, VNumber, VRef, VText
-
-
-class TestSpecExample:
-    """The primary example from the spec:
-
-    @%Rect (x y w h)
-    @#R1 %Rect(10 20 100 50)!id(#01)
-    #R1.x
-    """
-
-    def test_full_pipeline(self):
-        source = "@%Rect (x y w h) ; @#R1 %Rect(10 20 100 50)!id(#01) ; #R1.x"
-        doc = evaluate(stn.parse(source).ast)
-
-        # TypeDef registered
-        assert "Rect" in doc.typedefs
-        assert doc.typedefs["Rect"].params == ["x", "y", "w", "h"]
-
-        # Global var registered
-        r1 = doc.globals_["R1"]
-        assert isinstance(r1, VEntity)
-        assert r1.entity.type_name == "Rect"
-        assert r1.entity.fields == {
-            "x": VNumber(10),
-            "y": VNumber(20),
-            "w": VNumber(100),
-            "h": VNumber(50),
-        }
-        assert r1.entity.props == {"id": VRef("01")}
-
-        # Getter result
-        assert doc.results == [VNumber(10)]
+import pytest
+from stn import parse
+from stn_core import evaluate, Empty, VText, VNumber, VEntity, VEnum
 
 
-class TestMultipleGetters:
-    def test_access_all_fields(self):
-        source = (
-            "@%Rect (x y w h) ; "
-            "@#R1 %Rect(10 20 100 50) ; "
-            "#R1.x ; #R1.y ; #R1.w ; #R1.h"
-        )
-        doc = evaluate(stn.parse(source).ast)
-        assert doc.results == [
-            VNumber(10),
-            VNumber(20),
-            VNumber(100),
-            VNumber(50),
-        ]
+def test_completion_condition_entity():
+    """@@joe (:name [Joe Smith] :age 36) → doc.locals_['joe'] has VEntity."""
+    r = parse("@@joe (:name [Joe Smith] :age 36)")
+    doc = evaluate(r)
+    assert isinstance(doc.locals_["joe"], VEntity)
 
 
-class TestSetterThenGetter:
-    def test_prop_getter(self):
-        source = (
-            "@%Rect (x y w h) ; "
-            "@#R1 %Rect(10 20 100 50)!color([red]) ; "
-            "#R1.color"
-        )
-        doc = evaluate(stn.parse(source).ast)
-        assert doc.results == [VText("red")]
+def test_completion_condition_getter():
+    """@joe.name → VText('Joe Smith')."""
+    r = parse("@@joe (:name [Joe Smith] :age 36)\n@joe.name")
+    doc = evaluate(r)
+    assert str(doc.results[0]) == "Joe Smith"
 
 
-class TestBatchSetterIntegration:
-    def test_batch_then_getter(self):
-        source = (
-            "@%Pt (x y) ; "
-            "@#P1 %Pt(0 0)!+(x 5 y 10) ; "
-            "#P1.x ; #P1.y"
-        )
-        doc = evaluate(stn.parse(source).ast)
-        assert doc.results == [VNumber(5), VNumber(10)]
+def test_completion_condition_typedef():
+    """@%Person (:name :age %) → TypeDef registered."""
+    r = parse("@%Person (:name :age %)")
+    doc = evaluate(r)
+    assert "Person" in doc.typedefs
+    td = doc.typedefs["Person"]
+    assert len(td.members) == 2
 
 
-class TestBatchSetterWithKeyFormat:
-    def test_batch_set_with_colon_keys(self):
-        source = (
-            "@%Pt (x y) ; "
-            "@#P1 %Pt(0 0)!+(:x 5 :y 10) ; "
-            "#P1.x ; #P1.y"
-        )
-        doc = evaluate(stn.parse(source).ast)
-        assert doc.results == [VNumber(5), VNumber(10)]
+def test_completion_condition_undefined():
+    """@nobody → Empty (no error)."""
+    r = parse("@nobody")
+    doc = evaluate(r)
+    assert doc.results[0] is Empty
 
 
-class TestLocalVarDefIntegration:
-    def test_local_def_and_ref(self):
-        source = "@val (42) ; @val"
-        doc = evaluate(stn.parse(source).ast)
-        assert doc.results == [VNumber(42)]
-
-    def test_local_def_list(self):
-        from stn_core import VList
-        source = "@items (a b c)"
-        doc = evaluate(stn.parse(source).ast)
-        val = doc.locals_["items"]
-        assert isinstance(val, VList)
-        assert len(val.items) == 3
+def test_completion_condition_data_block():
+    """@_DATA.sec1 → VText from data block."""
+    text = "@_DATA.sec1\n====data====\n---- @sec1\nhello world\n"
+    r = parse(text)
+    doc = evaluate(r)
+    result = doc.results[0]
+    assert isinstance(result, VText)
+    assert "hello world" in str(result)
 
 
-class TestVRefIntegration:
-    def test_setter_with_ref_value(self):
-        source = "@%Pt (x y) ; @#P1 %Pt(1 2)!tag(#myid)"
-        doc = evaluate(stn.parse(source).ast)
-        entity = doc.globals_["P1"]
-        assert isinstance(entity, VEntity)
-        assert entity.entity.props["tag"] == VRef("myid")
+def test_typed_entity_with_typedef():
+    r = parse(
+        "@%Person (:name :age %)\n"
+        "@@joe %Person(:name [Joe Smith] :age 36)"
+    )
+    doc = evaluate(r)
+    joe = doc.locals_["joe"]
+    assert isinstance(joe, VEntity)
+    assert joe.typedef is not None
+    assert joe.typedef.name == "Person"
+    assert str(joe.fields["name"]) == "Joe Smith"
+    assert joe.fields["age"].value == 36.0
 
 
-class TestVDateIntegration:
-    def test_date_in_literal(self):
-        from stn_core import VDate
-        source = "@born ([2024-01-15])"
-        doc = evaluate(stn.parse(source).ast)
-        assert doc.locals_["born"] == VDate("2024-01-15")
+def test_typed_entity_with_enum():
+    r = parse(
+        "@%Person (:name :sex %e(F M))\n"
+        "@@joe %Person(:name Joe :sex M)"
+    )
+    doc = evaluate(r)
+    joe = doc.locals_["joe"]
+    assert isinstance(joe.fields["sex"], VEnum)
+    assert joe.fields["sex"].value == "M"
+    assert joe.fields["sex"].choices == ["F", "M"]
 
 
-class TestEmptyDocument:
-    def test_empty_source(self):
-        doc = evaluate(stn.parse("").ast)
-        assert doc.results == []
-        assert doc.globals_ == {}
-        assert doc.typedefs == {}
+def test_multiple_vars_and_getters():
+    r = parse(
+        "@@a (:x 1)\n"
+        "@@b (:x 2)\n"
+        "@a.x\n"
+        "@b.x"
+    )
+    doc = evaluate(r)
+    assert doc.results[0].value == 1.0
+    assert doc.results[1].value == 2.0
+
+
+def test_setter_chain():
+    r = parse("@@joe (:name Joe)\n@joe!age(36)!city(Tokyo)")
+    doc = evaluate(r)
+    joe = doc.results[0]
+    assert isinstance(joe, VEntity)
+    assert joe.props["age"].value == 36.0
+    assert str(joe.props["city"]) == "Tokyo"
+
+
+def test_public_and_local():
+    r = parse("@@local_x 1\n@#pub_y 2\n@local_x\n#pub_y")
+    doc = evaluate(r)
+    assert doc.results[0].value == 1.0
+    assert doc.results[1].value == 2.0
+
+
+def test_positional_args():
+    """Positional args assigned by TypeDef member order."""
+    r = parse(
+        "@%Person (:name :age %)\n"
+        "@@joe %Person(Joe 36)"
+    )
+    doc = evaluate(r)
+    joe = doc.locals_["joe"]
+    assert str(joe.fields["name"]) == "Joe"
+    assert joe.fields["age"].value == 36.0
+
+
+def test_str_representations():
+    assert str(VText("hello")) == "hello"
+    assert str(VNumber(42.0)) == "42"
+    assert str(VNumber(3.14)) == "3.14"
+    assert str(Empty) == "Empty"
