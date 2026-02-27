@@ -22,20 +22,38 @@ from .setter import apply_setter, apply_batch_setter
 
 
 # ---------------------------------------------------------------------------
-# Public entry point
+# Public entry points
 # ---------------------------------------------------------------------------
 
 def evaluate(result) -> Document:
-    """Evaluate a ParseResult (from stn.parse) and return a Document."""
+    """Evaluate a ParseResult (from stn.parse) and return a new Document."""
     env = Environment()
     doc = Document(environment=env)
+    new_results = _evaluate_into(result, env)
+    doc.results.extend(new_results)
+    return doc
 
-    # Set up _DATA from the data block
+
+def _evaluate_into(result, env: Environment) -> list[Value]:
+    """Evaluate *result* into an existing *env*, returning new result values.
+
+    Used both by ``evaluate()`` and ``Document.merge()``.
+    - Type definitions are added/overwritten in *env*.
+    - Variable definitions are added/overwritten in *env*.
+    - Data blocks are merged into the existing ``_DATA`` entity (or created).
+    - Expression results are returned as a list.
+    """
+    # Merge _DATA into existing entity, or create a new one
     if result.data:
-        data_entity = VEntity(typedef=None, type_name="_DATA")
-        for key, content in result.data.items():
-            data_entity.fields[key] = VText(content)
-        env.set_local("_DATA", data_entity)
+        existing = env.locals_.get("_DATA")
+        if isinstance(existing, VEntity):
+            for key, content in result.data.items():
+                existing.fields[key] = VText(content)
+        else:
+            data_entity = VEntity(typedef=None, type_name="_DATA")
+            for key, content in result.data.items():
+                data_entity.fields[key] = VText(content)
+            env.set_local("_DATA", data_entity)
 
     statements = split_statements(result.ast.items)
 
@@ -45,13 +63,14 @@ def evaluate(result) -> Document:
             _eval_typedef(stmt, env)
 
     # Pass 2: evaluate all statements
+    new_results: list[Value] = []
     for stmt in statements:
         kind = _classify(stmt)
         val = _eval_stmt(stmt, kind, env)
         if val is not None:
-            doc.results.append(val)
+            new_results.append(val)
 
-    return doc
+    return new_results
 
 
 # ---------------------------------------------------------------------------

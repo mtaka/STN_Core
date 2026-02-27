@@ -18,6 +18,7 @@ from .values import (
 from .typedef import TypeDef, MemberDef
 from .sobject import SObject, SEntry
 from .errors import STNCoreError
+from .repl import STNRepl
 
 __all__ = [
     "evaluate",
@@ -37,4 +38,5 @@ __all__ = [
     "SObject",
     "SEntry",
     "STNCoreError",
+    "STNRepl",
 ]
