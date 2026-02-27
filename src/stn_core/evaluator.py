@@ -184,8 +184,21 @@ def _eval_typedef(items: list, env: Environment) -> None:
     if def_node is None:
         return
 
-    members = parse_member_defs(def_node.items)
+    # Extract reserved __ entry (if any) before building TypeDef
+    reserved: dict[str, Value] = {}
+    for entry in parse_chunk_tokens(def_node.items):
+        if entry.key == "__":
+            if isinstance(entry.value, SObject):
+                reserved["__"] = _entries_to_ventity(entry.value.entries, None, None, env)
+            elif isinstance(entry.value, str) and entry.value:
+                reserved["__"] = atom_to_value(entry.value)
+            break
+
+    # Regular members exclude __
+    members = [m for m in parse_member_defs(def_node.items) if m.name != "__"]
+
     td = TypeDef(name=type_name, members=members)
+    td.reserved.update(reserved)
     env.register_typedef(td)
 
 
@@ -277,6 +290,11 @@ def _node_to_ventity(
     env: Environment,
 ) -> VEntity:
     entity = VEntity(typedef=td, type_name=type_name)
+
+    # Inherit reserved from TypeDef (cannot be overridden by instance data)
+    if td and td.reserved:
+        entity.reserved.update(td.reserved)
+
     entries = parse_chunk_tokens(node.items)
 
     has_keys = any(e.key is not None for e in entries)
@@ -284,7 +302,13 @@ def _node_to_ventity(
     if has_keys:
         for entry in entries:
             if entry.key == "__":
-                continue  # reserved — Phase 2
+                # Only set if NOT already inherited from TypeDef (non-overridable)
+                if "__" not in entity.reserved:
+                    if isinstance(entry.value, SObject):
+                        entity.reserved["__"] = _entries_to_ventity(
+                            entry.value.entries, None, None, env
+                        )
+                continue
             if entry.key is not None:
                 member = _find_member(td, entry.key) if td else None
                 entity.fields[entry.key] = _svalue_to_value(entry.value, member, env)

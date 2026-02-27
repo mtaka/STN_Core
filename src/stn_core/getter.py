@@ -20,6 +20,8 @@ def apply_getter(value: Value, accessor: str) -> Value:
             return value.fields[accessor]
         if accessor in value.props:
             return value.props[accessor]
+        if accessor in value.reserved:
+            return value.reserved[accessor]
         # Numeric index (1-based)
         try:
             idx = int(accessor) - 1
