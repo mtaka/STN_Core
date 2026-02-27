@@ -67,7 +67,9 @@ class VEntity:
     reserved: dict[str, "Value"] = field(default_factory=dict)
 
     def __str__(self) -> str:
-        return f"VEntity({self.type_name})"
+        if self.type_name:
+            return f"VEntity({self.type_name})"
+        return "VEntity"
 
 
 class _Empty:

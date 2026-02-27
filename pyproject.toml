@@ -11,6 +11,9 @@ dependencies = [
 [tool.uv.sources]
 stn-lexer = { path = "../STN_lexer", editable = true }
 
+[project.scripts]
+stn-repl = "stn_core.repl:main"
+
 [dependency-groups]
 dev = ["pytest>=8"]
 
