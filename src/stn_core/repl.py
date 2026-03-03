@@ -8,6 +8,13 @@ from __future__ import annotations
 import sys
 from typing import IO
 
+# 3-3: History support via readline (Unix) or no-op on Windows without it
+try:
+    import readline
+    readline.parse_and_bind("tab: complete")
+except ImportError:
+    pass
+
 from stn import parse
 
 from .document import Document
@@ -97,16 +104,22 @@ def _fmt_inspect(value: Value) -> str:
 
 def _eval_expr(repl: STNRepl, expr: str, dest: IO[str]) -> None:
     """Evaluate *expr* as STN and print the result to *dest*."""
-    result = repl.eval(expr)
-    if result is not None:
-        print(str(result), file=dest)
+    try:
+        result = repl.eval(expr)
+        if result is not None:
+            print(str(result), file=dest)
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
 
 
 def _inspect_expr(repl: STNRepl, expr: str, dest: IO[str]) -> None:
     """Evaluate *expr* as STN and pretty-print to *dest*."""
-    result = repl.eval(expr)
-    if result is not None:
-        print(_fmt_inspect(result), file=dest)
+    try:
+        result = repl.eval(expr)
+        if result is not None:
+            print(_fmt_inspect(result), file=dest)
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
 
 
 def _show_vars(repl: STNRepl, dest: IO[str]) -> None:
@@ -161,14 +174,17 @@ def _process_line(repl: STNRepl, line: str, dest: IO[str]) -> bool:
             _inspect_expr(repl, expr, dest)
             return True
 
-    # ── ? expression ──────────────────────────────────────────────────────
-    if line.startswith("? "):
-        _eval_expr(repl, line[2:].strip(), dest)
+    # ── ? expression (空白あり・なし両対応) ───────────────────────────────
+    # ?>> and ?<< are caught above/in main(); here we handle ?<expr>
+    if line.startswith("?") and line[1:2] not in (">", "<"):
+        expr = line[1:].lstrip()
+        if expr:
+            _eval_expr(repl, expr, dest)
         return True
 
     # ── Batch file (also usable from _process_line, e.g. in ?<< files) ───
-    if line.startswith("?<< "):
-        filepath = line[4:].strip()
+    if line.startswith("?<<"):
+        filepath = line[3:].strip()
         try:
             with open(filepath, encoding="utf-8") as fh:
                 for file_line in fh:
@@ -178,7 +194,10 @@ def _process_line(repl: STNRepl, line: str, dest: IO[str]) -> bool:
         return True
 
     # ── Regular STN input ─────────────────────────────────────────────────
-    repl.eval(line)
+    try:
+        repl.eval(line)
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
     return True
 
 
@@ -207,28 +226,27 @@ def main() -> None:
         if not line:
             continue
 
-        # ── Output redirect: ?>> filepath  /  ?>> ─────────────────────────
-        if line.startswith("?>> "):
-            filepath = line[4:].strip()
-            if _file:
-                _file.close()
-            try:
-                _file = open(filepath, "w", encoding="utf-8")
-                dest = _file
-            except OSError as exc:
-                print(f"Error opening '{filepath}': {exc}", file=sys.stderr)
+        # ── Output redirect: ?>>filepath  /  ?>> filepath  /  ?>> ────────
+        if line.startswith("?>>"):
+            rest = line[3:].strip()
+            if rest:
+                if _file:
+                    _file.close()
+                try:
+                    _file = open(rest, "w", encoding="utf-8")
+                    dest = _file
+                except OSError as exc:
+                    print(f"Error opening '{rest}': {exc}", file=sys.stderr)
+            else:
+                if _file:
+                    _file.close()
+                    _file = None
+                dest = sys.stdout
             continue
 
-        if line == "?>>":
-            if _file:
-                _file.close()
-                _file = None
-            dest = sys.stdout
-            continue
-
-        # ── Batch execute: ?<< filepath ───────────────────────────────────
-        if line.startswith("?<< "):
-            filepath = line[4:].strip()
+        # ── Batch execute: ?<<filepath  /  ?<< filepath ───────────────────
+        if line.startswith("?<<"):
+            filepath = line[3:].strip()
             try:
                 with open(filepath, encoding="utf-8") as fh:
                     for file_line in fh:

@@ -29,19 +29,21 @@ def evaluate(result) -> Document:
     """Evaluate a ParseResult (from stn.parse) and return a new Document."""
     env = Environment()
     doc = Document(environment=env)
-    new_results = _evaluate_into(result, env)
-    doc.results.extend(new_results)
+    entries = _evaluate_into(result, env)
+    for key, val in entries:
+        doc.results.append(val)
+        doc._doc_entries.append((key, val))
     return doc
 
 
-def _evaluate_into(result, env: Environment) -> list[Value]:
-    """Evaluate *result* into an existing *env*, returning new result values.
+def _evaluate_into(result, env: Environment) -> "list[tuple[str | None, Value]]":
+    """Evaluate *result* into an existing *env*, returning (key, value) pairs.
 
     Used both by ``evaluate()`` and ``Document.merge()``.
     - Type definitions are added/overwritten in *env*.
     - Variable definitions are added/overwritten in *env*.
     - Data blocks are merged into the existing ``_DATA`` entity (or created).
-    - Expression results are returned as a list.
+    - Expression results are returned as (top-level-key, value) pairs.
     """
     # Merge _DATA into existing entity, or create a new one
     if result.data:
@@ -63,14 +65,41 @@ def _evaluate_into(result, env: Environment) -> list[Value]:
             _eval_typedef(stmt, env)
 
     # Pass 2: evaluate all statements
-    new_results: list[Value] = []
+    new_results: list[tuple[str | None, Value]] = []
     for stmt in statements:
         kind = _classify(stmt)
-        val = _eval_stmt(stmt, kind, env)
-        if val is not None:
-            new_results.append(val)
+        if kind in ("local_def", "public_def", "typedef"):
+            _eval_stmt(stmt, kind, env)  # side effects only, no result
+            continue
+
+        if kind == "expr":
+            top_key, rhs_items = _extract_top_key(stmt)
+            val = _eval_rhs(rhs_items, env)
+        else:
+            # local_ref / public_ref
+            top_key = None
+            val = _eval_stmt(stmt, kind, env)
+
+        new_results.append((top_key, val))
 
     return new_results
+
+
+def _extract_top_key(items: list) -> "tuple[str | None, list]":
+    """If *items* starts with ':name', return (name, rest). Else (None, items)."""
+    if (
+        len(items) >= 2
+        and isinstance(items[0], Token)
+        and items[0].type == TokenType.SIGIL
+        and items[0].value == ":"
+        and items[0].word_head
+        and not items[0].word_tail
+        and isinstance(items[1], Token)
+        and items[1].type == TokenType.ATOM
+        and not items[1].word_head
+    ):
+        return items[1].value, items[2:]
+    return None, items
 
 
 # ---------------------------------------------------------------------------

@@ -171,6 +171,52 @@ def test_process_line_stn_eval():
 
 
 # ---------------------------------------------------------------------------
+# 3-2: ? クエリ空白不要
+# ---------------------------------------------------------------------------
+
+def test_process_line_question_mark_no_space():
+    """?@joe.name (空白なし) でも値が出力される"""
+    repl = STNRepl()
+    repl.eval("@@x 42")
+    buf = io.StringIO()
+    _process_line(repl, "?@x", buf)
+    assert "42" in buf.getvalue()
+
+
+def test_process_line_question_mark_with_space():
+    """? @joe.name (空白あり) も引き続き動作"""
+    repl = STNRepl()
+    repl.eval("@@x 99")
+    buf = io.StringIO()
+    _process_line(repl, "? @x", buf)
+    assert "99" in buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# 3-1: 例外で落ちない
+# ---------------------------------------------------------------------------
+
+def test_process_line_exception_does_not_crash():
+    """STN評価中の例外はキャッチされてプロンプトに戻る"""
+    import sys
+    repl = STNRepl()
+    buf = io.StringIO()
+    old_stderr = sys.stderr
+    sys.stderr = io.StringIO()
+    try:
+        # inject an error by monkeypatching eval
+        original_eval = repl.eval
+        def bad_eval(text):
+            raise RuntimeError("forced error")
+        repl.eval = bad_eval
+        result = _process_line(repl, "@@x 1", buf)
+        assert result is True  # didn't crash, returned True to continue
+    finally:
+        sys.stderr = old_stderr
+        repl.eval = original_eval
+
+
+# ---------------------------------------------------------------------------
 # Batch execution via _process_line with ?<< (file)
 # ---------------------------------------------------------------------------
 
@@ -190,6 +236,17 @@ def test_batch_file(tmp_path):
     out = buf.getvalue()
     assert "山田太郎" in out
     assert "山田花子" in out
+
+
+def test_batch_file_no_space(tmp_path):
+    """`?<<file.stn` (空白なし) でも動作する"""
+    from stn_core.repl import _process_line
+    stn_file = tmp_path / "input.stn"
+    stn_file.write_text("@@x (:v 1)\n? @x.v\n", encoding="utf-8")
+    repl = STNRepl()
+    buf = io.StringIO()
+    _process_line(repl, f"?<<{stn_file}", buf)
+    assert "1" in buf.getvalue()
 
 
 # ---------------------------------------------------------------------------

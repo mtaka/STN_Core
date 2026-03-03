@@ -17,8 +17,9 @@ class Document:
     results: list[Value] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        # Not a dataclass field — tracks last result from the most recent merge()
+        # Not dataclass fields — managed manually
         self._last_result: Value | None = None
+        self._doc_entries: list[tuple[str | None, Value]] = []
 
     # -- Convenience accessors ------------------------------------------
 
@@ -39,6 +40,30 @@ class Document:
         """The last expression value produced by the most recent merge()."""
         return self._last_result
 
+    # -- Top-level SObject interface ------------------------------------
+
+    def get(self, key: "str | int") -> Value:
+        """Access top-level results by name or 1-origin index.
+
+        - str  → first entry whose top-level key matches
+        - int  → 1-origin index into all top-level result entries
+        - Missing key / out-of-range index → Empty
+        """
+        from .values import Empty
+
+        if isinstance(key, int):
+            if key < 1:
+                return Empty
+            idx = key - 1
+            if idx < len(self._doc_entries):
+                return self._doc_entries[idx][1]
+            return Empty
+
+        for entry_key, val in self._doc_entries:
+            if entry_key == key:
+                return val
+        return Empty
+
     # -- Incremental evaluation -----------------------------------------
 
     def merge(self, result) -> None:
@@ -51,6 +76,8 @@ class Document:
         - Expression results → appended to results; last one stored in last_result
         """
         from .evaluator import _evaluate_into
-        new_results = _evaluate_into(result, self.environment)
-        self.results.extend(new_results)
-        self._last_result = new_results[-1] if new_results else None
+        new_entries = _evaluate_into(result, self.environment)
+        for key, val in new_entries:
+            self.results.append(val)
+            self._doc_entries.append((key, val))
+        self._last_result = new_entries[-1][1] if new_entries else None
