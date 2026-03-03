@@ -5,20 +5,90 @@ Also provides the ``stn-repl`` CLI entry point via ``main()``.
 
 from __future__ import annotations
 
+import re
 import sys
 from typing import IO
-
-# 3-3: History support via readline (Unix) or no-op on Windows without it
-try:
-    import readline
-    readline.parse_and_bind("tab: complete")
-except ImportError:
-    pass
 
 from stn import parse
 
 from .document import Document
 from .values import Value, VText, VNumber, VDate, VBool, VEnum, VList, VEntity, _Empty, Empty
+
+
+# ---------------------------------------------------------------------------
+# Readline / history setup
+# ---------------------------------------------------------------------------
+
+def _build_input_fn():
+    """Return an input()-compatible callable with history support.
+
+    Priority:
+    1. prompt_toolkit  — cross-platform, works in MinTTY / Windows / Unix
+    2. readline        — Unix / macOS
+    3. plain input()   — fallback (no history)
+    """
+    # 1. prompt_toolkit — best cross-platform support (including MinTTY)
+    try:
+        from prompt_toolkit import prompt as _pt_prompt  # type: ignore
+        from prompt_toolkit.history import InMemoryHistory  # type: ignore
+
+        _history = InMemoryHistory()
+
+        def _input_pt(prompt: str = "") -> str:
+            try:
+                return _pt_prompt(prompt, history=_history)
+            except Exception:
+                # Non-interactive environment (tests, piped input, etc.)
+                return input(prompt)
+
+        return _input_pt
+    except ImportError:
+        pass
+
+    # 2. Standard readline (Unix / macOS)
+    try:
+        import readline
+        readline.parse_and_bind("tab: complete")
+        return input  # readline hooks into input() automatically
+    except ImportError:
+        pass
+
+    # 3. Plain input() — no history
+    return input
+
+
+_input = _build_input_fn()
+
+
+# ---------------------------------------------------------------------------
+# doc.get() REPL handler
+# ---------------------------------------------------------------------------
+
+_DOC_GET_RE = re.compile(r"^doc\.get\((.+)\)$", re.DOTALL)
+
+
+def _try_doc_get(repl: "STNRepl", expr: str, dest: IO[str]) -> bool:
+    """If *expr* is 'doc.get(key)', evaluate and print. Returns True if handled."""
+    m = _DOC_GET_RE.match(expr.strip())
+    if not m:
+        return False
+    arg = m.group(1).strip()
+
+    # String literal key: 'key' or "key"
+    if (arg.startswith("'") and arg.endswith("'")) or (
+        arg.startswith('"') and arg.endswith('"')
+    ):
+        key: str | int = arg[1:-1]
+    else:
+        # Integer key
+        try:
+            key = int(arg)
+        except ValueError:
+            return False
+
+    result = repl.doc.get(key)
+    print(_fmt_inspect(result), file=dest)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +173,9 @@ def _fmt_inspect(value: Value) -> str:
 
 
 def _eval_expr(repl: STNRepl, expr: str, dest: IO[str]) -> None:
-    """Evaluate *expr* as STN and print the result to *dest*."""
+    """Evaluate *expr* as STN (or as doc.get()) and print the result to *dest*."""
+    if _try_doc_get(repl, expr, dest):
+        return
     try:
         result = repl.eval(expr)
         if result is not None:
@@ -215,7 +287,7 @@ def main() -> None:
 
     while True:
         try:
-            line = input("STN> ").strip()
+            line = _input("STN> ").strip()
         except EOFError:
             print()
             break
