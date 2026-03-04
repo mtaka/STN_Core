@@ -28,8 +28,12 @@ class Document:
         return self.environment.locals_
 
     @property
-    def publics(self) -> dict[str, Value]:
-        return self.environment.publics
+    def symbols(self) -> dict[str, Value]:
+        return self.environment.symbols
+
+    @property
+    def publics(self) -> dict[str, Value]:  # backward compat alias
+        return self.environment.symbols
 
     @property
     def typedefs(self) -> dict[str, TypeDef]:

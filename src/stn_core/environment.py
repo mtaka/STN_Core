@@ -14,7 +14,7 @@ class Environment:
 
     typedefs: dict[str, TypeDef] = field(default_factory=dict)
     locals_: dict[str, Value] = field(default_factory=dict)
-    publics: dict[str, Value] = field(default_factory=dict)
+    symbols: dict[str, Value] = field(default_factory=dict)
 
     # -- TypeDef --------------------------------------------------------
 
@@ -32,10 +32,22 @@ class Environment:
     def get_local(self, name: str) -> Value:
         return self.locals_.get(name, Empty)
 
-    # -- Publics (@#) ---------------------------------------------------
+    # -- Symbols (@# / !#()) --------------------------------------------
+
+    def set_symbol(self, name: str, value: Value) -> None:
+        self.symbols[name] = value
+
+    def get_symbol(self, name: str) -> Value:
+        return self.symbols.get(name, Empty)
+
+    # -- Backward compat aliases ----------------------------------------
+
+    @property
+    def publics(self) -> dict[str, Value]:
+        return self.symbols
 
     def set_public(self, name: str, value: Value) -> None:
-        self.publics[name] = value
+        self.set_symbol(name, value)
 
     def get_public(self, name: str) -> Value:
-        return self.publics.get(name, Empty)
+        return self.get_symbol(name)

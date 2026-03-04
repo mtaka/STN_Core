@@ -13,6 +13,7 @@ from stn import parse
 
 from .document import Document
 from .values import Value, VText, VNumber, VDate, VBool, VEnum, VList, VEntity, _Empty, Empty
+from .typedef import TypeDef
 
 
 # ---------------------------------------------------------------------------
@@ -64,31 +65,6 @@ _input = _build_input_fn()
 # doc.get() REPL handler
 # ---------------------------------------------------------------------------
 
-_DOC_GET_RE = re.compile(r"^doc\.get\((.+)\)$", re.DOTALL)
-
-
-def _try_doc_get(repl: "STNRepl", expr: str, dest: IO[str]) -> bool:
-    """If *expr* is 'doc.get(key)', evaluate and print. Returns True if handled."""
-    m = _DOC_GET_RE.match(expr.strip())
-    if not m:
-        return False
-    arg = m.group(1).strip()
-
-    # String literal key: 'key' or "key"
-    if (arg.startswith("'") and arg.endswith("'")) or (
-        arg.startswith('"') and arg.endswith('"')
-    ):
-        key: str | int = arg[1:-1]
-    else:
-        # Integer key
-        try:
-            key = int(arg)
-        except ValueError:
-            return False
-
-    result = repl.doc.get(key)
-    print(_fmt_inspect(result), file=dest)
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -173,9 +149,7 @@ def _fmt_inspect(value: Value) -> str:
 
 
 def _eval_expr(repl: STNRepl, expr: str, dest: IO[str]) -> None:
-    """Evaluate *expr* as STN (or as doc.get()) and print the result to *dest*."""
-    if _try_doc_get(repl, expr, dest):
-        return
+    """Evaluate *expr* as STN and print the result to *dest*."""
     try:
         result = repl.eval(expr)
         if result is not None:
@@ -216,6 +190,17 @@ def _show_types(repl: STNRepl, dest: IO[str]) -> None:
         print(f"  @%{name}  ({member_names})", file=dest)
 
 
+def _show_symbols(repl: STNRepl, dest: IO[str]) -> None:
+    """Print all defined symbols."""
+    syms = repl.doc.symbols
+    if not syms:
+        print("  (no symbols defined)", file=dest)
+        return
+    width = max(len(k) for k in syms)
+    for name, value in syms.items():
+        print(f"  #{name:<{width}} : {str(value)}", file=dest)
+
+
 def _process_line(repl: STNRepl, line: str, dest: IO[str]) -> bool:
     """Process one input line.  Returns False when the session should end."""
     line = line.strip()
@@ -239,6 +224,10 @@ def _process_line(repl: STNRepl, line: str, dest: IO[str]) -> bool:
         repl.reset()
         return True
 
+    if line == ":symbols":
+        _show_symbols(repl, dest)
+        return True
+
     # ── inspect() / i() ───────────────────────────────────────────────────
     for prefix in ("inspect(", "i("):
         if line.startswith(prefix) and line.endswith(")"):
@@ -246,17 +235,17 @@ def _process_line(repl: STNRepl, line: str, dest: IO[str]) -> bool:
             _inspect_expr(repl, expr, dest)
             return True
 
-    # ── ? expression (空白あり・なし両対応) ───────────────────────────────
-    # ?>> and ?<< are caught above/in main(); here we handle ?<expr>
-    if line.startswith("?") and line[1:2] not in (">", "<"):
-        expr = line[1:].lstrip()
+    # ── ?? expression emitter (空白あり・なし両対応) ───────────────────────
+    # ??>> and ??<< are caught in main(); here we handle ??<expr>
+    if line.startswith("??") and line[2:3] not in (">", "<"):
+        expr = line[2:].lstrip()
         if expr:
             _eval_expr(repl, expr, dest)
         return True
 
-    # ── Batch file (also usable from _process_line, e.g. in ?<< files) ───
-    if line.startswith("?<<"):
-        filepath = line[3:].strip()
+    # ── Batch file (also usable from _process_line, e.g. in ??<< files) ──
+    if line.startswith("??<<"):
+        filepath = line[4:].strip()
         try:
             with open(filepath, encoding="utf-8") as fh:
                 for file_line in fh:
@@ -283,7 +272,7 @@ def main() -> None:
     dest: IO[str] = sys.stdout
     _file: IO[str] | None = None
 
-    print("STN REPL  (:q to quit  |  :vars  :types  :reset  |  ? <expr>  inspect(<expr>))")
+    print("STN REPL  (:q to quit  |  :vars  :types  :symbols  :reset  |  ??<expr>  inspect(<expr>))")
 
     while True:
         try:
@@ -298,9 +287,9 @@ def main() -> None:
         if not line:
             continue
 
-        # ── Output redirect: ?>>filepath  /  ?>> filepath  /  ?>> ────────
-        if line.startswith("?>>"):
-            rest = line[3:].strip()
+        # ── Output redirect: ??>>filepath  /  ??>> filepath  /  ??>> ─────
+        if line.startswith("??>>"):
+            rest = line[4:].strip()
             if rest:
                 if _file:
                     _file.close()
@@ -316,9 +305,9 @@ def main() -> None:
                 dest = sys.stdout
             continue
 
-        # ── Batch execute: ?<<filepath  /  ?<< filepath ───────────────────
-        if line.startswith("?<<"):
-            filepath = line[3:].strip()
+        # ── Batch execute: ??<<filepath  /  ??<< filepath ─────────────────
+        if line.startswith("??<<"):
+            filepath = line[4:].strip()
             try:
                 with open(filepath, encoding="utf-8") as fh:
                     for file_line in fh:

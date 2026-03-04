@@ -143,7 +143,7 @@ def test_process_line_question_mark():
     repl = STNRepl()
     repl.eval("@@x 42")
     buf = io.StringIO()
-    _process_line(repl, "? @x", buf)
+    _process_line(repl, "?? @x", buf)
     assert "42" in buf.getvalue()
 
 def test_process_line_inspect():
@@ -171,24 +171,24 @@ def test_process_line_stn_eval():
 
 
 # ---------------------------------------------------------------------------
-# 3-2: ? クエリ空白不要
+# 3-2: ?? エミッター空白不要
 # ---------------------------------------------------------------------------
 
 def test_process_line_question_mark_no_space():
-    """?@joe.name (空白なし) でも値が出力される"""
+    """??@joe.name (空白なし) でも値が出力される"""
     repl = STNRepl()
     repl.eval("@@x 42")
     buf = io.StringIO()
-    _process_line(repl, "?@x", buf)
+    _process_line(repl, "??@x", buf)
     assert "42" in buf.getvalue()
 
 
 def test_process_line_question_mark_with_space():
-    """? @joe.name (空白あり) も引き続き動作"""
+    """?? @joe.name (空白あり) も引き続き動作"""
     repl = STNRepl()
     repl.eval("@@x 99")
     buf = io.StringIO()
-    _process_line(repl, "? @x", buf)
+    _process_line(repl, "?? @x", buf)
     assert "99" in buf.getvalue()
 
 
@@ -226,26 +226,26 @@ def test_batch_file(tmp_path):
     stn_file.write_text(
         "@@taro (:name 山田太郎)\n"
         "@@hanako (:name 山田花子)\n"
-        "? @taro.name\n"
-        "? @hanako.name\n",
+        "?? @taro.name\n"
+        "?? @hanako.name\n",
         encoding="utf-8",
     )
     repl = STNRepl()
     buf = io.StringIO()
-    _process_line(repl, f"?<< {stn_file}", buf)
+    _process_line(repl, f"??<< {stn_file}", buf)
     out = buf.getvalue()
     assert "山田太郎" in out
     assert "山田花子" in out
 
 
 def test_batch_file_no_space(tmp_path):
-    """`?<<file.stn` (空白なし) でも動作する"""
+    """`??<<file.stn` (空白なし) でも動作する"""
     from stn_core.repl import _process_line
     stn_file = tmp_path / "input.stn"
-    stn_file.write_text("@@x (:v 1)\n? @x.v\n", encoding="utf-8")
+    stn_file.write_text("@@x (:v 1)\n??@x.v\n", encoding="utf-8")
     repl = STNRepl()
     buf = io.StringIO()
-    _process_line(repl, f"?<<{stn_file}", buf)
+    _process_line(repl, f"??<<{stn_file}", buf)
     assert "1" in buf.getvalue()
 
 
