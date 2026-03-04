@@ -2,7 +2,7 @@
 
 Structural evaluation engine for STN AST.
 
-STN Core takes the AST produced by [STN Lexer](../STN_lexer) and reconstructs it into a typed, evaluated **Document** — resolving type definitions, variable bindings, entity creation, and getter/setter operations.
+STN Core takes the AST produced by [STN Lexer](https://github.com/mtaka/STN_lexer) and reconstructs it into a typed, evaluated **Document** — resolving type definitions, variable bindings, entity creation, and getter/setter operations.
 
 ## Installation
 
@@ -100,4 +100,4 @@ STN text → [STN Lexer] → AST (Node) → [STN Core] → Document
 uv run pytest tests/ -v
 ```
 
-See [stn_core_spec_v01_ja_r3.md](stn_core_spec_v01_ja_r3.md) for the full specification.
+See [spec.md](spec.md) for the full STN specification.

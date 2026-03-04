@@ -2,7 +2,7 @@
 
 STN AST の構造評価エンジンです。
 
-STN Core は [STN Lexer](../STN_lexer) が生成する AST を受け取り、型定義・変数束縛・Entity 生成・getter/setter 適用を経て、評価済みの **Document** を構築します。
+STN Core は [STN Lexer](https://github.com/mtaka/STN_lexer) が生成する AST を受け取り、型定義・変数束縛・Entity 生成・getter/setter 適用を経て、評価済みの **Document** を構築します。
 
 ## インストール
 
@@ -100,4 +100,4 @@ STN テキスト → [STN Lexer] → AST (Node) → [STN Core] → Document
 uv run pytest tests/ -v
 ```
 
-詳細な仕様は [stn_core_spec_v01_ja_r3.md](stn_core_spec_v01_ja_r3.md) を参照してください。
+詳細な仕様は [spec.md](spec.md) を参照してください。
