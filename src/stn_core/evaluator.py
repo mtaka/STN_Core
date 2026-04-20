@@ -64,10 +64,14 @@ def _evaluate_into(result, env: Environment) -> "list[tuple[str | None, Value]]"
 
     statements = split_statements(result.ast.items)
 
-    # Pass 1: collect type definitions
+    # Pass 1: collect regular type definitions (skip typification — needs Pass 3)
+    typification_stmts: list[list] = []
     for stmt in statements:
         if _classify(stmt) == "typedef":
-            _eval_typedef(stmt, env)
+            if _is_typification_typedef(stmt):
+                typification_stmts.append(stmt)
+            else:
+                _eval_typedef(stmt, env)
 
     # Pass 2: evaluate all statements
     new_results: list[tuple[str | None, Value]] = []
@@ -87,6 +91,10 @@ def _evaluate_into(result, env: Environment) -> "list[tuple[str | None, Value]]"
             val = _eval_stmt(stmt, kind, env)
 
         new_results.append((top_key, val))
+
+    # Pass 3: typification typedefs (deferred — depend on @@vars from Pass 2)
+    for stmt in typification_stmts:
+        _eval_typedef(stmt, env)
 
     return new_results
 
@@ -223,14 +231,72 @@ def _eval_setter_node_value(node: Node, env: Environment) -> Value:
     return _entries_to_ventity(entries, None, None, env)
 
 
+def _extract_at_name(node: Node) -> "str | None":
+    """Extract local var name from an (@name) node."""
+    items = node.items
+    if (
+        len(items) >= 2
+        and isinstance(items[0], Token)
+        and items[0].type == TokenType.SIGIL
+        and items[0].value == "@"
+        and isinstance(items[1], Token)
+        and items[1].type == TokenType.ATOM
+        and not items[1].word_head
+    ):
+        return items[1].value
+    return None
+
+
+def _typify_var(var_name: str, env: Environment) -> "TypeDef | None":
+    """Create a TypeDef from a variable's properties (typification).
+
+    All entity fields (non-auto-named) and props are flattened into td.props.
+    The entity's typedef members are inherited for constructor support.
+    """
+    entity = env.get_local(var_name)
+    if not isinstance(entity, VEntity):
+        return None
+    members: list[MemberDef] = []
+    if entity.typedef:
+        members = list(entity.typedef.members)
+    td = TypeDef(name=f"_typify_{var_name}", members=members)
+    for k, v in entity.fields.items():
+        if not k.startswith("_"):
+            td.props[k] = v
+    for k, v in entity.props.items():
+        td.props[k] = v
+    return td
+
+
+def _is_typification_typedef(stmt: list) -> bool:
+    """Return True if stmt is @%Name %(@var) — a typification typedef."""
+    if len(stmt) < 5:
+        return False
+    rhs = stmt[3:]
+    if not (
+        len(rhs) >= 2
+        and isinstance(rhs[0], Token)
+        and rhs[0].type == TokenType.SIGIL
+        and rhs[0].value == "%"
+        and rhs[0].word_head
+        and isinstance(rhs[1], Node)
+        and not rhs[1].word_head
+    ):
+        return False
+    return _extract_at_name(rhs[1]) is not None
+
+
 def _eval_typedef(items: list, env: Environment) -> None:
     """@%Name ... → env.typedefs[Name] = TypeDef
 
     Supported forms:
-      @%Name (:members...)                  — simple member definition
-      @%Name %Parent                         — extend parent, inherit constructor
-      @%Name %Parent!prop(val)...            — extend + class props
-      @%Name %Parent!prop(val)...(:members)  — extend + class props + constructor override
+      @%Name (:members...)                        — simple member definition
+      @%Name %Parent                               — extend parent, inherit constructor
+      @%Name %Parent!prop(val)...                  — extend + class props
+      @%Name %Parent!prop(val)...(:members)        — extend + class props + constructor override
+      @%Name %(@var)                               — typification: create type from variable
+      @%Name %(@var)!-(key ...)                    — typification with exclusions
+      @%Name %(@var)!prop(val)...                  — typification + extra class props
     """
     if len(items) < 3:
         return
@@ -242,29 +308,59 @@ def _eval_typedef(items: list, env: Environment) -> None:
     rhs = items[3:]
     i = 0
 
-    # Detect parent type: %ParentName (word_head=True %, glued ATOM)
+    # Detect parent type or typification source
     parent_td: TypeDef | None = None
-    if (
-        i < len(rhs)
-        and isinstance(rhs[i], Token)
-        and rhs[i].type == TokenType.SIGIL
-        and rhs[i].value == "%"
-        and rhs[i].word_head
-        and i + 1 < len(rhs)
-        and isinstance(rhs[i + 1], Token)
-        and rhs[i + 1].type == TokenType.ATOM
-        and not rhs[i + 1].word_head
-    ):
-        parent_name = rhs[i + 1].value
-        parent_td = env.resolve_typedef(parent_name)
-        i += 2
+    is_typification = False
 
-    # Collect class-level props from !setter chains
+    if i < len(rhs) and isinstance(rhs[i], Token) and rhs[i].type == TokenType.SIGIL and rhs[i].value == "%" and rhs[i].word_head:
+        # Typification: %(@var) — % followed by a glued Node
+        if (
+            i + 1 < len(rhs)
+            and isinstance(rhs[i + 1], Node)
+            and not rhs[i + 1].word_head
+        ):
+            var_name = _extract_at_name(rhs[i + 1])
+            if var_name is not None:
+                parent_td = _typify_var(var_name, env)
+                is_typification = True
+                i += 2
+        # Regular named parent: %ParentName — % followed by a glued ATOM
+        elif (
+            i + 1 < len(rhs)
+            and isinstance(rhs[i + 1], Token)
+            and rhs[i + 1].type == TokenType.ATOM
+            and not rhs[i + 1].word_head
+        ):
+            parent_name = rhs[i + 1].value
+            parent_td = env.resolve_typedef(parent_name)
+            i += 2
+
+    # Collect class-level props and exclusion keys from setter chains
     td_props: dict[str, Value] = {}
+    td_exclude: set[str] = set()
     while i < len(rhs):
         item = rhs[i]
-        # !name(val)
+        # !-(keys) unsetter
         if (
+            isinstance(item, Token)
+            and item.type == TokenType.SIGIL
+            and item.value == "!"
+            and not item.word_head
+            and i + 1 < len(rhs)
+            and isinstance(rhs[i + 1], Token)
+            and rhs[i + 1].type == TokenType.SIGIL
+            and rhs[i + 1].value == "-"
+            and not rhs[i + 1].word_head
+        ):
+            if i + 2 < len(rhs) and isinstance(rhs[i + 2], Node) and not rhs[i + 2].word_head:
+                for entry in parse_chunk_tokens(rhs[i + 2].items):
+                    if entry.key is None and isinstance(entry.value, str):
+                        td_exclude.add(entry.value)
+                i += 3
+            else:
+                i += 2
+        # !name(val)
+        elif (
             isinstance(item, Token)
             and item.type == TokenType.SIGIL
             and item.value == "!"
@@ -316,8 +412,17 @@ def _eval_typedef(items: list, env: Environment) -> None:
     elif parent_td is not None:
         members = list(parent_td.members)  # inherit constructor from parent
 
-    td = TypeDef(name=type_name, members=members, parent=parent_td)
-    td.props.update(td_props)
+    # For typification, flatten parent props (minus exclusions) into td.props directly.
+    # For named parent, rely on chain walk via td.parent (no copying needed).
+    if is_typification and parent_td is not None:
+        td = TypeDef(name=type_name, members=members, parent=None)
+        for k, v in parent_td.props.items():
+            if k not in td_exclude:
+                td.props[k] = v
+    else:
+        td = TypeDef(name=type_name, members=members, parent=parent_td)
+
+    td.props.update(td_props)  # explicit props override inherited
     td.reserved.update(reserved)
     env.register_typedef(td)
 
@@ -412,18 +517,21 @@ def _eval_instantiation(items: list, start: int, env: Environment) -> "tuple[Val
     """
     i = start + 1  # skip %
 
-    # Optional glued type name
+    # Optional glued type name OR typification var %(@var)
     type_name: str | None = None
-    if (
-        i < len(items)
-        and isinstance(items[i], Token)
-        and items[i].type == TokenType.ATOM
-        and not items[i].word_head
-    ):
-        type_name = items[i].value
-        i += 1
-
-    td = env.resolve_typedef(type_name) if type_name else None
+    td: TypeDef | None = None
+    if i < len(items):
+        nxt = items[i]
+        if isinstance(nxt, Token) and nxt.type == TokenType.ATOM and not nxt.word_head:
+            type_name = nxt.value
+            td = env.resolve_typedef(type_name)
+            i += 1
+        elif isinstance(nxt, Node) and not nxt.word_head:
+            var_name = _extract_at_name(nxt)
+            if var_name is not None:
+                type_name = f"_typify_{var_name}"
+                td = _typify_var(var_name, env)
+                i += 1
 
     # Pre-constructor !setter chains → class-level props
     pre_props: dict[str, Value] = {}
@@ -526,8 +634,7 @@ def _node_to_ventity(
                     entity.fields[member.name] = _svalue_to_value(
                         entries[idx].value, member, env
                     )
-                else:
-                    entity.fields[member.name] = Empty
+                # else: omit — allows typedef.props lookup for missing constructor args
         else:
             for idx, entry in enumerate(entries):
                 entity.fields[f"_{idx}"] = _svalue_to_value(entry.value, None, env)
@@ -865,6 +972,25 @@ def _eval_chain(value: Value, items: list, start: int, env: Environment) -> Valu
                 sym_name = _extract_symbol_name(items[i + 2])
                 if sym_name is not None:
                     env.set_symbol(sym_name, value)
+                i += 3
+                continue
+
+            # Unsetter: !-(keys) — remove keys from entity fields/props
+            if (
+                isinstance(nxt, Token)
+                and nxt.type == TokenType.SIGIL
+                and nxt.value == "-"
+                and not nxt.word_head
+                and i + 2 < len(items)
+                and isinstance(items[i + 2], Node)
+                and not items[i + 2].word_head
+            ):
+                if isinstance(value, VEntity):
+                    for entry in parse_chunk_tokens(items[i + 2].items):
+                        if entry.key is None and isinstance(entry.value, str):
+                            key = entry.value
+                            value.fields.pop(key, None)
+                            value.props.pop(key, None)
                 i += 3
                 continue
 

@@ -20,7 +20,20 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # ---------------------------------------------------------------------------
 
 def unwrap_literal(atom: str) -> str:
-    """Remove [...] brackets and unescape \\]."""
+    """Remove [...] or [[[[\n...\n]]]] brackets.
+
+    4-bracket block literal [[[[\ncontent\n]]]] → content (leading/trailing \\n stripped).
+    Regular string literal [...] → content (\\] unescaped).
+    """
+    # 4-bracket block literal: [[[[\ncontent\n]]]]
+    if len(atom) >= 8 and atom[:4] == "[[[[" and atom[-4:] == "]]]]":
+        inner = atom[4:-4]
+        if inner.startswith("\n"):
+            inner = inner[1:]
+        if inner.endswith("\n"):
+            inner = inner[:-1]
+        return inner
+    # Regular string literal: [content] with \] escape
     if atom.startswith("[") and atom.endswith("]"):
         inner = atom[1:-1]
         return inner.replace(r"\]", "]")
@@ -148,10 +161,109 @@ def _node_to_sobject(node: Node) -> SObject:
 # parse_chunk_tokens
 # ---------------------------------------------------------------------------
 
+def _percent_inst_span(items: list, i: int) -> int:
+    """Return the span of a %TypeName?(Node) pattern starting at *i*, or 0.
+
+    Detects:  %TypeName(args)   →  span 3  (glued)
+              %TypeName (args)  →  span 3  (space-separated, when TypeName present)
+              %(args)           →  span 2  (anonymous, must be glued)
+    TypeName must always be glued to %.
+    A lone % or %TypeName without args does NOT match (returns 0).
+    """
+    item = items[i]
+    if not (isinstance(item, Token) and item.type == TokenType.SIGIL and item.value == "%"):
+        return 0
+    j = i + 1
+    has_type_name = False
+    # Optional glued TypeName (must be ATOM, not another SIGIL)
+    if (
+        j < len(items)
+        and isinstance(items[j], Token)
+        and items[j].type == TokenType.ATOM
+        and not items[j].word_head
+    ):
+        j += 1
+        has_type_name = True
+    # Args Node: glued always accepted; space-separated accepted when TypeName present
+    if j < len(items) and isinstance(items[j], Node):
+        if not items[j].word_head or has_type_name:
+            return j + 1 - i
+    return 0
+
+
+def _setter_span(items: list, j: int) -> int:
+    """Return the span of one glued setter expression starting at *j*, or 0.
+
+    Setter must be glued to the preceding token (not word_head).
+    Recognises:
+        !(Node)           id shortcut setter        span 2
+        !#(Node)          symbol registration        span 3
+        !+(Node)          batch setter               span 3
+        !name(Node)       named setter               span 3
+    """
+    item = items[j]
+    if not (
+        isinstance(item, Token)
+        and item.type == TokenType.SIGIL
+        and item.value == "!"
+        and not item.word_head
+    ):
+        return 0
+
+    k = j + 1
+    if k >= len(items):
+        return 0
+
+    nxt = items[k]
+
+    # !(Node) — id shortcut setter
+    if isinstance(nxt, Node) and not nxt.word_head:
+        return 2
+
+    if not (isinstance(nxt, Token) and not nxt.word_head):
+        return 0
+
+    # !#(Node), !+(Node) — two-sigil setters
+    if nxt.type == TokenType.SIGIL and nxt.value in ("#", "+"):
+        k += 1
+        if k < len(items) and isinstance(items[k], Node) and not items[k].word_head:
+            return k + 1 - j
+        return 0
+
+    # !name(Node) — named setter
+    if nxt.type == TokenType.ATOM:
+        k += 1
+        if k < len(items) and isinstance(items[k], Node) and not items[k].word_head:
+            return k + 1 - j
+        return 0
+
+    return 0
+
+
+def _value_chain_span(items: list, i: int) -> int:
+    """Span of %TypeName?(Node) followed by zero or more glued setter expressions.
+
+    Returns 0 if there is no leading %TypeName?(Node).
+    """
+    n = _percent_inst_span(items, i)
+    if n == 0:
+        return 0
+    j = i + n
+    while j < len(items):
+        s = _setter_span(items, j)
+        if s == 0:
+            break
+        j += s
+    return j - i
+
+
 def parse_chunk_tokens(items: list) -> list[SEntry]:
     """Parse items using gluing flags to detect :key value pairs.
 
     :(word_head=T, word_tail=F) + ATOM/NUMBER(word_head=F) → key start.
+    %TypeName?(Node) glued sequences are grouped into a single SObject entry
+    so that _svalue_to_value can recognize and evaluate them as typed
+    instantiations (fixing the nested %Type(...) limitation).
     Everything else → unnamed value (key=None).
     """
     entries: list[SEntry] = []
@@ -178,8 +290,18 @@ def parse_chunk_tokens(items: list) -> list[SEntry]:
                 )
                 entries.append(SEntry(key=key, value=sub))
         else:
-            entries.append(SEntry(key=None, value=_item_to_svalue(items[i])))
-            i += 1
+            # Group %TypeName?(Node) + trailing setter chain as a single SObject
+            # so the evaluator can treat it as a typed instantiation with setters.
+            n = _value_chain_span(items, i)
+            if n > 0:
+                sub = SObject(
+                    [SEntry(key=None, value=_item_to_svalue(it)) for it in items[i : i + n]]
+                )
+                entries.append(SEntry(key=None, value=sub))
+                i += n
+            else:
+                entries.append(SEntry(key=None, value=_item_to_svalue(items[i])))
+                i += 1
 
     return entries
 
