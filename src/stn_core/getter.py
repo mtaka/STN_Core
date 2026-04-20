@@ -22,6 +22,12 @@ def apply_getter(value: Value, accessor: str) -> Value:
             return value.props[accessor]
         if accessor in value.reserved:
             return value.reserved[accessor]
+        # Walk typedef chain for class-level props
+        td = value.typedef
+        while td is not None:
+            if accessor in td.props:
+                return td.props[accessor]  # type: ignore[return-value]
+            td = td.parent
         # Numeric index (1-based)
         try:
             idx = int(accessor) - 1
@@ -135,6 +141,13 @@ def apply_query_locator(value: Value, condition_node: object, env: object) -> Va
     def _matches(entity: VEntity) -> bool:
         for key, expected in conditions.items():
             actual = entity.fields.get(key) or entity.props.get(key)
+            if actual is None:
+                td = entity.typedef
+                while td is not None:
+                    if key in td.props:
+                        actual = td.props[key]  # type: ignore[assignment]
+                        break
+                    td = td.parent
             if actual is None:
                 return False
             if str(actual) != expected:

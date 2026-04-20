@@ -209,8 +209,29 @@ def _eval_public_def(items: list, env: Environment) -> None:
     env.set_symbol(name, val)
 
 
+def _eval_setter_node_value(node: Node, env: Environment) -> Value:
+    """Evaluate a setter argument Node to a Value.
+
+    ``(Japan)`` → VText("Japan"),  ``(:x 1 :y 2)`` → VEntity,
+    ``(0 5000)`` → VEntity with positional fields.
+    """
+    entries = parse_chunk_tokens(node.items)
+    if not entries:
+        return Empty
+    if len(entries) == 1 and entries[0].key is None:
+        return _svalue_to_value(entries[0].value, None, env)
+    return _entries_to_ventity(entries, None, None, env)
+
+
 def _eval_typedef(items: list, env: Environment) -> None:
-    """@%Name (...)  →  env.typedefs[Name] = TypeDef"""
+    """@%Name ... → env.typedefs[Name] = TypeDef
+
+    Supported forms:
+      @%Name (:members...)                  — simple member definition
+      @%Name %Parent                         — extend parent, inherit constructor
+      @%Name %Parent!prop(val)...            — extend + class props
+      @%Name %Parent!prop(val)...(:members)  — extend + class props + constructor override
+    """
     if len(items) < 3:
         return
     name_tok = items[2]
@@ -218,29 +239,85 @@ def _eval_typedef(items: list, env: Environment) -> None:
         return
     type_name = name_tok.value
 
-    def_node: Node | None = None
-    for item in items[3:]:
-        if isinstance(item, Node):
-            def_node = item
+    rhs = items[3:]
+    i = 0
+
+    # Detect parent type: %ParentName (word_head=True %, glued ATOM)
+    parent_td: TypeDef | None = None
+    if (
+        i < len(rhs)
+        and isinstance(rhs[i], Token)
+        and rhs[i].type == TokenType.SIGIL
+        and rhs[i].value == "%"
+        and rhs[i].word_head
+        and i + 1 < len(rhs)
+        and isinstance(rhs[i + 1], Token)
+        and rhs[i + 1].type == TokenType.ATOM
+        and not rhs[i + 1].word_head
+    ):
+        parent_name = rhs[i + 1].value
+        parent_td = env.resolve_typedef(parent_name)
+        i += 2
+
+    # Collect class-level props from !setter chains
+    td_props: dict[str, Value] = {}
+    while i < len(rhs):
+        item = rhs[i]
+        # !name(val)
+        if (
+            isinstance(item, Token)
+            and item.type == TokenType.SIGIL
+            and item.value == "!"
+            and not item.word_head
+            and i + 2 < len(rhs)
+            and isinstance(rhs[i + 1], Token)
+            and rhs[i + 1].type == TokenType.ATOM
+            and not rhs[i + 1].word_head
+            and isinstance(rhs[i + 2], Node)
+            and not rhs[i + 2].word_head
+        ):
+            key = rhs[i + 1].value
+            td_props[key] = _eval_setter_node_value(rhs[i + 2], env)
+            i += 3
+        # !+(batch)
+        elif (
+            isinstance(item, Token)
+            and item.type == TokenType.SIGIL
+            and item.value == "!"
+            and not item.word_head
+            and i + 2 < len(rhs)
+            and isinstance(rhs[i + 1], Token)
+            and rhs[i + 1].type == TokenType.SIGIL
+            and rhs[i + 1].value == "+"
+            and not rhs[i + 1].word_head
+            and isinstance(rhs[i + 2], Node)
+            and not rhs[i + 2].word_head
+        ):
+            for entry in parse_chunk_tokens(rhs[i + 2].items):
+                if entry.key is not None:
+                    td_props[entry.key] = _svalue_to_value(entry.value, None, env)
+            i += 3
+        else:
             break
 
-    if def_node is None:
-        return
-
-    # Extract reserved __ entry (if any) before building TypeDef
+    # Constructor definition (remaining Node = member list or override)
+    members: list[MemberDef] = []
     reserved: dict[str, Value] = {}
-    for entry in parse_chunk_tokens(def_node.items):
-        if entry.key == "__":
-            if isinstance(entry.value, SObject):
-                reserved["__"] = _entries_to_ventity(entry.value.entries, None, None, env)
-            elif isinstance(entry.value, str) and entry.value:
-                reserved["__"] = atom_to_value(entry.value)
-            break
+    if i < len(rhs) and isinstance(rhs[i], Node):
+        def_node = rhs[i]
+        for entry in parse_chunk_tokens(def_node.items):
+            if entry.key == "__":
+                if isinstance(entry.value, SObject):
+                    reserved["__"] = _entries_to_ventity(entry.value.entries, None, None, env)
+                elif isinstance(entry.value, str) and entry.value:
+                    reserved["__"] = atom_to_value(entry.value)
+                break
+        members = [m for m in parse_member_defs(def_node.items) if m.name != "__"]
+    elif parent_td is not None:
+        members = list(parent_td.members)  # inherit constructor from parent
 
-    # Regular members exclude __
-    members = [m for m in parse_member_defs(def_node.items) if m.name != "__"]
-
-    td = TypeDef(name=type_name, members=members)
+    td = TypeDef(name=type_name, members=members, parent=parent_td)
+    td.props.update(td_props)
     td.reserved.update(reserved)
     env.register_typedef(td)
 
@@ -310,23 +387,10 @@ def _eval_rhs_n(items: list, env: Environment) -> "tuple[Value, int]":
         return _node_to_ventity(i0, None, None, env), 1
 
     if isinstance(i0, Token):
-        # Typed instantiation: %TypeName(args) or %(args)
+        # Typed instantiation: %TypeName[!pre_setters](args)
         if i0.type == TokenType.SIGIL and i0.value == "%":
-            consumed = 1  # skip %
-            if (
-                consumed < len(items)
-                and isinstance(items[consumed], Token)
-                and items[consumed].type == TokenType.ATOM
-                and not items[consumed].word_head
-            ):
-                consumed += 1  # skip TypeName
-            if (
-                consumed < len(items)
-                and isinstance(items[consumed], Node)
-                and not items[consumed].word_head
-            ):
-                consumed += 1  # skip (args)
-            return _eval_instantiation(items, 0, env), consumed
+            val, consumed = _eval_instantiation(items, 0, env)
+            return val, consumed
 
         # Simple scalar
         if i0.type == TokenType.ATOM:
@@ -337,26 +401,87 @@ def _eval_rhs_n(items: list, env: Environment) -> "tuple[Value, int]":
     return Empty, 0
 
 
-def _eval_instantiation(items: list, start: int, env: Environment) -> Value:
-    """Evaluate %TypeName(args) or %(args) starting at *start*."""
-    i = start + 1  # skip the %
+def _eval_instantiation(items: list, start: int, env: Environment) -> "tuple[Value, int]":
+    """Evaluate %TypeName[!pre_setters](args) starting at *start*.
 
-    type_name: str | None = None
+    Returns ``(entity, items_consumed_from_start)``.
+
+    Pre-constructor ``!setter(val)`` values are stored in ``entity.fields``
+    so they take precedence over later ``!setter`` calls (which go to
+    ``entity.props``).  This gives class-variable / constant semantics.
+    """
+    i = start + 1  # skip %
 
     # Optional glued type name
-    if i < len(items):
-        nxt = items[i]
-        if isinstance(nxt, Token) and nxt.type == TokenType.ATOM and not nxt.word_head:
-            type_name = nxt.value
-            i += 1
+    type_name: str | None = None
+    if (
+        i < len(items)
+        and isinstance(items[i], Token)
+        and items[i].type == TokenType.ATOM
+        and not items[i].word_head
+    ):
+        type_name = items[i].value
+        i += 1
 
     td = env.resolve_typedef(type_name) if type_name else None
 
-    # Glued args Node
-    if i < len(items) and isinstance(items[i], Node) and not items[i].word_head:
-        return _node_to_ventity(items[i], type_name, td, env)
+    # Pre-constructor !setter chains → class-level props
+    pre_props: dict[str, Value] = {}
+    while i < len(items):
+        item = items[i]
+        # !name(val)
+        if (
+            isinstance(item, Token)
+            and item.type == TokenType.SIGIL
+            and item.value == "!"
+            and not item.word_head
+            and i + 2 < len(items)
+            and isinstance(items[i + 1], Token)
+            and items[i + 1].type == TokenType.ATOM
+            and not items[i + 1].word_head
+            and isinstance(items[i + 2], Node)
+            and not items[i + 2].word_head
+        ):
+            key = items[i + 1].value
+            pre_props[key] = _eval_setter_node_value(items[i + 2], env)
+            i += 3
+        # !+(batch)
+        elif (
+            isinstance(item, Token)
+            and item.type == TokenType.SIGIL
+            and item.value == "!"
+            and not item.word_head
+            and i + 2 < len(items)
+            and isinstance(items[i + 1], Token)
+            and items[i + 1].type == TokenType.SIGIL
+            and items[i + 1].value == "+"
+            and not items[i + 1].word_head
+            and isinstance(items[i + 2], Node)
+            and not items[i + 2].word_head
+        ):
+            for entry in parse_chunk_tokens(items[i + 2].items):
+                if entry.key is not None:
+                    pre_props[entry.key] = _svalue_to_value(entry.value, None, env)
+            i += 3
+        else:
+            break
 
-    return VEntity(typedef=td, type_name=type_name)
+    # Constructor Node (glued to chain)
+    entity: VEntity
+    if i < len(items) and isinstance(items[i], Node) and not items[i].word_head:
+        entity = _node_to_ventity(items[i], type_name, td, env)
+        i += 1
+    else:
+        entity = VEntity(typedef=td, type_name=type_name)
+        if td and td.reserved:
+            entity.reserved.update(td.reserved)
+
+    # Pre-props → fields (checked before props → constant semantics)
+    for k, v in pre_props.items():
+        if k not in entity.fields:
+            entity.fields[k] = v
+
+    return entity, i - start
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +544,149 @@ def _find_member(td: TypeDef | None, name: str) -> MemberDef | None:
     return None
 
 
+def _sym_name_from_sentry(sval: "SValue") -> "str | None":
+    """Extract symbol name from an SObject representing a (#name) node.
+
+    parse_chunk_tokens converts ``(#name)`` Node items to
+    ``SObject([SEntry(None,'#'), SEntry(None,'name')])``.
+    """
+    if not isinstance(sval, SObject):
+        return None
+    entries = sval.entries
+    if (
+        len(entries) >= 2
+        and entries[0].key is None
+        and entries[0].value == "#"
+        and entries[1].key is None
+        and isinstance(entries[1].value, str)
+    ):
+        return entries[1].value
+    return None
+
+
+def _apply_sentry_chain(value: Value, entries: "list[SEntry]", env: Environment) -> Value:
+    """Apply setter chain SEntry items to *value*.
+
+    Mirrors the logic in ``_eval_chain`` but operates on SEntry objects
+    produced by parse_chunk_tokens, enabling setter chains inside nested ().
+
+    Handles:
+        SEntry('!')  SEntry(SObject{#name})            →  !(#name) id setter
+        SEntry('!')  SEntry('#')  SEntry(SObject{#n})  →  !#(#name) symbol reg.
+        SEntry('!')  SEntry('+')  SEntry(SObject{args}) →  !+(args) batch setter
+        SEntry('!')  SEntry('name') SEntry(SObject{})  →  !name(args) named setter
+    """
+    i = 0
+    while i < len(entries):
+        entry = entries[i]
+        if entry.key is not None or entry.value != "!":
+            break
+        i += 1
+        if i >= len(entries) or entries[i].key is not None:
+            break
+
+        nxt = entries[i].value
+
+        # !(#name) — id shortcut setter
+        if isinstance(nxt, SObject):
+            sym_name = _sym_name_from_sentry(nxt)
+            if sym_name is not None:
+                value = _apply_id_setter(value, sym_name)
+            i += 1
+            continue
+
+        if not isinstance(nxt, str):
+            break
+
+        # !#(#name) — symbol registration setter
+        if nxt == "#":
+            i += 1
+            if i < len(entries) and entries[i].key is None:
+                sym_name = _sym_name_from_sentry(entries[i].value)
+                if sym_name is not None:
+                    env.set_symbol(sym_name, value)
+                i += 1
+            continue
+
+        # !+(args) — batch setter: apply to value.props
+        if nxt == "+":
+            i += 1
+            if i < len(entries) and entries[i].key is None and isinstance(entries[i].value, SObject):
+                args_entries = entries[i].value.entries
+                if isinstance(value, VEntity):
+                    for ae in args_entries:
+                        if ae.key is not None and isinstance(ae.value, str):
+                            from .reader import atom_to_value as _atv
+                            value.props[ae.key] = _atv(ae.value)
+                i += 1
+            continue
+
+        # !name(args) — named setter: set value.props[name]
+        if isinstance(nxt, str) and nxt not in ("%", ""):
+            name = nxt
+            i += 1
+            if i < len(entries) and entries[i].key is None and isinstance(entries[i].value, SObject):
+                args_entries = entries[i].value.entries
+                if isinstance(value, VEntity) and args_entries:
+                    ae = args_entries[0]
+                    if ae.key is None and isinstance(ae.value, str):
+                        from .reader import atom_to_value as _atv
+                        value.props[name] = _atv(ae.value)
+                i += 1
+            continue
+
+        break
+
+    return value
+
+
+def _try_typed_instantiation(sval: SObject, env: Environment) -> "Value | None":
+    """Detect a %TypeName?(args)[setters]* pattern inside an SObject and evaluate it.
+
+    parse_chunk_tokens groups glued ``%TypeName?(Node) setter*`` sequences into
+    a single SObject.  The entries layout is:
+        SEntry(None,'%')
+        SEntry(None,'TypeName')?
+        SEntry(None,SObject{args})?
+        [setter entries …]
+    Evaluate the instantiation and apply any trailing setter chain.
+    """
+    entries = sval.entries
+    if not entries or entries[0].key is not None or entries[0].value != "%":
+        return None
+
+    idx = 1
+    type_name: str | None = None
+
+    # Optional glued TypeName
+    if (
+        idx < len(entries)
+        and entries[idx].key is None
+        and isinstance(entries[idx].value, str)
+        and entries[idx].value not in ("%", "")
+    ):
+        type_name = entries[idx].value
+        idx += 1
+
+    # Glued args SObject → evaluate the instantiation
+    if idx < len(entries) and entries[idx].key is None and isinstance(entries[idx].value, SObject):
+        args_sobj = entries[idx].value
+        td = env.resolve_typedef(type_name) if type_name else None
+        value: Value = _entries_to_ventity(args_sobj.entries, type_name, td, env)
+        # Apply trailing setter chain (!(#id), !#(#name), etc.)
+        value = _apply_sentry_chain(value, entries[idx + 1 :], env)
+        return value
+
+    # %TypeName with no args → empty entity (+ possible setters)
+    if type_name is not None and idx <= len(entries):
+        td = env.resolve_typedef(type_name)
+        value = VEntity(typedef=td, type_name=type_name)
+        value = _apply_sentry_chain(value, entries[idx:], env)
+        return value
+
+    return None
+
+
 def _svalue_to_value(sval: SValue, member: MemberDef | None, env: Environment) -> Value:
     """Convert an SValue to a proper Value, guided by MemberDef if available."""
     if isinstance(sval, str):
@@ -427,6 +695,13 @@ def _svalue_to_value(sval: SValue, member: MemberDef | None, env: Environment) -
         return _coerce_str(sval, member, env)
 
     if isinstance(sval, SObject):
+        # Priority: detect nested %TypeName(args) typed instantiation.
+        # parse_chunk_tokens groups these into a single SObject so we can
+        # recognise the pattern here and evaluate it correctly.
+        inst = _try_typed_instantiation(sval, env)
+        if inst is not None:
+            return inst
+
         if member is not None and member.kind not in (
             "text", "number", "float", "date", "datetime", "bool", "enum", "sobject"
         ):
@@ -452,13 +727,33 @@ def _entries_to_ventity(
     env: Environment,
 ) -> VEntity:
     entity = VEntity(typedef=td, type_name=type_name)
-    for entry in entries:
-        if entry.key is not None:
-            member = _find_member(td, entry.key) if td else None
-            entity.fields[entry.key] = _svalue_to_value(entry.value, member, env)
+    has_keys = any(e.key is not None for e in entries)
+
+    if has_keys:
+        for entry in entries:
+            if entry.key is not None:
+                member = _find_member(td, entry.key) if td else None
+                entity.fields[entry.key] = _svalue_to_value(entry.value, member, env)
+            else:
+                idx = len(entity.fields)
+                entity.fields[f"_{idx}"] = _svalue_to_value(entry.value, None, env)
+    else:
+        # Positional args: map to typedef member names when available,
+        # consistent with _node_to_ventity behaviour.
+        if td:
+            non_reserved = [m for m in td.members if m.name != "__"]
+            for idx, entry in enumerate(entries):
+                if idx < len(non_reserved):
+                    member = non_reserved[idx]
+                    entity.fields[member.name] = _svalue_to_value(entry.value, member, env)
+                else:
+                    entity.fields[f"_{len(entity.fields)}"] = _svalue_to_value(
+                        entry.value, None, env
+                    )
         else:
-            idx = len(entity.fields)
-            entity.fields[f"_{idx}"] = _svalue_to_value(entry.value, None, env)
+            for idx, entry in enumerate(entries):
+                entity.fields[f"_{idx}"] = _svalue_to_value(entry.value, None, env)
+
     return entity
 
 

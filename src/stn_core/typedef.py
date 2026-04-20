@@ -17,4 +17,6 @@ class MemberDef:
 class TypeDef:
     name: str  # "" if anonymous
     members: list[MemberDef]
+    parent: "TypeDef | None" = None
+    props: dict[str, "object"] = field(default_factory=dict)  # class-level properties
     reserved: dict[str, object] = field(default_factory=dict)
