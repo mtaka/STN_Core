@@ -24,6 +24,7 @@ from .getter import (
     apply_query_locator,
 )
 from .setter import apply_setter, apply_batch_setter
+from .funcdef import FuncDef
 
 
 # ---------------------------------------------------------------------------
@@ -64,21 +65,24 @@ def _evaluate_into(result, env: Environment) -> "list[tuple[str | None, Value]]"
 
     statements = split_statements(result.ast.items)
 
-    # Pass 1: collect regular type definitions (skip typification — needs Pass 3)
+    # Pass 1: collect typedefs and funcdefs (skip typification — needs Pass 3)
     typification_stmts: list[list] = []
     for stmt in statements:
-        if _classify(stmt) == "typedef":
+        kind = _classify(stmt)
+        if kind == "typedef":
             if _is_typification_typedef(stmt):
                 typification_stmts.append(stmt)
             else:
                 _eval_typedef(stmt, env)
+        elif kind == "funcdef":
+            _eval_funcdef(stmt, env)
 
     # Pass 2: evaluate all statements
     new_results: list[tuple[str | None, Value]] = []
     for stmt in statements:
         kind = _classify(stmt)
-        if kind in ("local_def", "public_def", "typedef"):
-            _eval_stmt(stmt, kind, env)  # side effects only, no result
+        if kind in ("local_def", "public_def", "typedef", "funcdef"):
+            _eval_stmt(stmt, kind, env)  # side effects only (already done in pass 1)
             continue
 
         if kind == "expr":
@@ -148,6 +152,8 @@ def _classify(items: list) -> str:
                     return "public_def"
                 if i1.value == "%":
                     return "typedef"
+                if i1.value == "=":
+                    return "funcdef"
             elif i1.type == TokenType.ATOM:
                 return "local_ref"
 
@@ -172,7 +178,7 @@ def _eval_stmt(items: list, kind: str, env: Environment) -> Value | None:
     if kind == "public_def":
         _eval_public_def(items, env)
         return None
-    if kind == "typedef":
+    if kind in ("typedef", "funcdef"):
         # Already done in Pass 1; skip
         return None
     if kind == "local_ref":
@@ -229,6 +235,251 @@ def _eval_setter_node_value(node: Node, env: Environment) -> Value:
     if len(entries) == 1 and entries[0].key is None:
         return _svalue_to_value(entries[0].value, None, env)
     return _entries_to_ventity(entries, None, None, env)
+
+
+def _register_system_functions(env: Environment) -> None:
+    """Register all built-in system functions into *env*."""
+    from .system_funcs import get_system_functions
+    for fd in get_system_functions():
+        env.register_function(fd)
+
+
+def _parse_params(node: Node) -> "list":
+    """Parse a function parameter node ($a $b default ...) into list[ParamDef]."""
+    from .funcdef import ParamDef
+    params = []
+    items = node.items
+    i = 0
+    while i < len(items):
+        item = items[i]
+        # $varname — new parameter
+        if (
+            isinstance(item, Token)
+            and item.type == TokenType.SIGIL
+            and item.value == "$"
+            and i + 1 < len(items)
+            and isinstance(items[i + 1], Token)
+            and items[i + 1].type == TokenType.ATOM
+            and not items[i + 1].word_head
+        ):
+            params.append(ParamDef(name=items[i + 1].value))
+            i += 2
+        elif params:
+            # This is a default value for the most recently declared param
+            if params[-1].default is None:
+                if isinstance(item, Token) and item.type == TokenType.ATOM:
+                    params[-1].default = atom_to_value(unwrap_literal(item.value))
+                elif isinstance(item, Token) and item.type == TokenType.NUMBER:
+                    from .values import VNumber as _VN
+                    params[-1].default = _VN(float(item.value))
+            i += 1
+        else:
+            i += 1
+    return params
+
+
+def _eval_funcdef(items: list, env: Environment) -> None:
+    """@=funcname($params...) body? → env.functions[name] = FuncDef
+
+    Supported forms:
+      @=name($a $b default)        — declaration / override (no body)
+      @=[literal name]($a) ( ... ) — user-defined function with body
+    """
+    if len(items) < 3:
+        return
+    name_tok = items[2]
+    if not isinstance(name_tok, Token) or name_tok.type != TokenType.ATOM:
+        return
+    func_name = unwrap_literal(name_tok.value)
+
+    idx = 3
+    params = []
+    body = None
+
+    # Params node
+    if idx < len(items) and isinstance(items[idx], Node) and not items[idx].word_head:
+        params = _parse_params(items[idx])
+        idx += 1
+
+    # Body node (user-defined) — accept regardless of word_head (may be space-separated)
+    if idx < len(items) and isinstance(items[idx], Node):
+        body = items[idx]
+
+    from .funcdef import FuncDef as _FD
+    if body is not None:
+        # User-defined: always register (overrides system function)
+        env.register_function(_FD(name=func_name, params=params, body=body))
+    elif env.get_function(func_name) is None:
+        # Declaration only: register with no impl
+        env.register_function(_FD(name=func_name, params=params))
+
+
+def _parse_func_args(args_node, env: Environment) -> "list[Value]":
+    """Evaluate each argument expression in *args_node* using the full evaluator.
+
+    Arguments are separated by any word_head boundary, so ``(@items [ ])``
+    yields two values: the VList for ``@items`` and VText(" ").
+    """
+    if args_node is None:
+        return []
+    stmts = _split_func_args(args_node.items)
+    values = []
+    for stmt in stmts:
+        if stmt:
+            val, consumed = _eval_rhs_n(stmt, env)
+            val = _eval_chain(val, stmt, consumed, env)
+            values.append(val)
+    return values
+
+
+def _call_function(name: str, args_node, receiver: "Value | None", env: Environment) -> Value:
+    """Execute function *name* with args from *args_node* (and optional *receiver*)."""
+    fd = env.get_function(name)
+    if fd is None:
+        return Empty
+
+    arg_values: list[Value] = [receiver] if receiver is not None else []
+    arg_values.extend(_parse_func_args(args_node, env))
+
+    # Bind params
+    scope: dict[str, Value] = {}
+    for idx, param in enumerate(fd.params):
+        if idx < len(arg_values):
+            scope[param.name] = arg_values[idx]
+        elif param.default is not None:
+            scope[param.name] = param.default
+        else:
+            scope[param.name] = Empty
+
+    # Execute
+    if fd.impl is not None:
+        call_args = [scope.get(p.name, Empty) for p in fd.params]
+        try:
+            return fd.impl(*call_args)
+        except Exception:
+            return Empty
+
+    if fd.body is not None:
+        return _eval_func_body(fd.body, scope, env)
+
+    return Empty
+
+
+def _eval_func_body(body_node, scope: "dict[str, Value]", env: Environment) -> Value:
+    """Evaluate a user-defined function body with local scope."""
+    env.push_scope(scope)
+    try:
+        stmts = _split_body_stmts(body_node.items)
+        return_val: Value = Empty
+
+        for stmt in stmts:
+            if not stmt:
+                continue
+            s0 = stmt[0]
+
+            # $var value — local variable assignment
+            if (
+                isinstance(s0, Token)
+                and s0.type == TokenType.SIGIL
+                and s0.value == "$"
+                and len(stmt) >= 2
+                and isinstance(stmt[1], Token)
+                and stmt[1].type == TokenType.ATOM
+                and not stmt[1].word_head
+            ):
+                var_name = stmt[1].value
+                val, consumed = _eval_rhs_n(stmt[2:], env)
+                val = _eval_chain(val, stmt[2:], consumed, env)
+                env.set_scope_var(var_name, val)
+                continue
+
+            # =(expr) — explicit return value (= followed directly by Node)
+            if (
+                isinstance(s0, Token)
+                and s0.type == TokenType.SIGIL
+                and s0.value == "="
+                and len(stmt) >= 2
+                and isinstance(stmt[1], Node)
+                and not stmt[1].word_head
+            ):
+                return_val = _eval_return_node(stmt[1], env)
+                continue
+
+            # Regular expression — evaluate and keep as implicit return
+            val, consumed = _eval_rhs_n(stmt, env)
+            val = _eval_chain(val, stmt, consumed, env)
+            return_val = val
+
+        return return_val
+    finally:
+        env.pop_scope()
+
+
+def _split_func_args(items: list) -> "list[list]":
+    """Split function argument items into per-argument lists.
+
+    Splits on *any* token/Node with ``word_head=True``, so space-separated
+    argument tokens each become their own argument expression.
+    Used by ``_parse_func_args``.
+    """
+    if not items:
+        return []
+    stmts: list[list] = []
+    current: list = []
+    for item in items:
+        is_head = (isinstance(item, Token) and item.word_head) or (
+            isinstance(item, Node) and item.word_head
+        )
+        if is_head and current:
+            stmts.append(current)
+            current = []
+        current.append(item)
+    if current:
+        stmts.append(current)
+    return stmts
+
+
+def _split_body_stmts(items: list) -> "list[list]":
+    """Split function body items into mini-statements.
+
+    A new statement starts only when a ``$``, ``=``, ``@``, or ``#`` SIGIL token
+    appears with ``word_head=True``.  Other word_head tokens (e.g. ``[value]``
+    as a default value after ``$var``) remain part of the current statement,
+    so ``$x [default]`` is parsed as a single assignment.
+    Used by ``_eval_func_body``.
+    """
+    if not items:
+        return []
+    stmts: list[list] = []
+    current: list = []
+    for item in items:
+        is_stmt_start = (
+            isinstance(item, Token)
+            and item.word_head
+            and item.type == TokenType.SIGIL
+            and item.value in ("$", "=", "@", "#")
+        )
+        if is_stmt_start and current:
+            stmts.append(current)
+            current = []
+        current.append(item)
+    if current:
+        stmts.append(current)
+    return stmts
+
+
+def _eval_return_node(node, env: Environment) -> Value:
+    """Evaluate =(node) — creates VEntity for keyed entries, else VList/single Value."""
+    entries = parse_chunk_tokens(node.items)
+    if not entries:
+        return Empty
+    has_keys = any(e.key is not None for e in entries)
+    if has_keys:
+        return _entries_to_ventity(entries, None, None, env)
+    values = [_svalue_to_value(e.value, None, env) for e in entries]
+    if len(values) == 1:
+        return values[0]
+    return VList(values)
 
 
 def _extract_at_name(node: Node) -> "str | None":
@@ -496,6 +747,64 @@ def _eval_rhs_n(items: list, env: Environment) -> "tuple[Value, int]":
         if i0.type == TokenType.SIGIL and i0.value == "%":
             val, consumed = _eval_instantiation(items, 0, env)
             return val, consumed
+
+        # Function call: =funcname(args)
+        if (
+            i0.type == TokenType.SIGIL
+            and i0.value == "="
+            and len(items) >= 3
+            and isinstance(items[1], Token)
+            and items[1].type == TokenType.ATOM
+            and not items[1].word_head
+            and isinstance(items[2], Node)
+            and not items[2].word_head
+        ):
+            val = _call_function(unwrap_literal(items[1].value), items[2], None, env)
+            return val, 3
+
+        # Return-value expression: =(node) — identity/grouping
+        if (
+            i0.type == TokenType.SIGIL
+            and i0.value == "="
+            and len(items) >= 2
+            and isinstance(items[1], Node)
+            and not items[1].word_head
+        ):
+            val = _eval_return_node(items[1], env)
+            return val, 2
+
+        # Scope variable: $varname
+        if (
+            i0.type == TokenType.SIGIL
+            and i0.value == "$"
+            and len(items) >= 2
+            and isinstance(items[1], Token)
+            and items[1].type == TokenType.ATOM
+            and not items[1].word_head
+        ):
+            return env.get_scope_var(items[1].value), 2
+
+        # Local var reference: @varname (for use in function args, body etc.)
+        if (
+            i0.type == TokenType.SIGIL
+            and i0.value == "@"
+            and len(items) >= 2
+            and isinstance(items[1], Token)
+            and items[1].type == TokenType.ATOM
+            and not items[1].word_head
+        ):
+            return env.get_local(items[1].value), 2
+
+        # Symbol reference: #name
+        if (
+            i0.type == TokenType.SIGIL
+            and i0.value == "#"
+            and len(items) >= 2
+            and isinstance(items[1], Token)
+            and items[1].type == TokenType.ATOM
+            and not items[1].word_head
+        ):
+            return env.get_symbol(items[1].value), 2
 
         # Simple scalar
         if i0.type == TokenType.ATOM:
@@ -797,6 +1106,9 @@ def _try_typed_instantiation(sval: SObject, env: Environment) -> "Value | None":
 def _svalue_to_value(sval: SValue, member: MemberDef | None, env: Environment) -> Value:
     """Convert an SValue to a proper Value, guided by MemberDef if available."""
     if isinstance(sval, str):
+        # $varname — scope variable reference
+        if sval.startswith("$") and len(sval) > 1:
+            return env.get_scope_var(sval[1:])
         if member is None:
             return atom_to_value(sval)
         return _coerce_str(sval, member, env)
@@ -944,6 +1256,24 @@ def _eval_chain(value: Value, items: list, start: int, env: Environment) -> Valu
             and i + 1 < len(items)
         ):
             nxt = items[i + 1]
+
+            # Method call: !=funcname(args) — receiver is first arg
+            if (
+                isinstance(nxt, Token)
+                and nxt.type == TokenType.SIGIL
+                and nxt.value == "="
+                and not nxt.word_head
+                and i + 2 < len(items)
+                and isinstance(items[i + 2], Token)
+                and items[i + 2].type == TokenType.ATOM
+                and not items[i + 2].word_head
+                and i + 3 < len(items)
+                and isinstance(items[i + 3], Node)
+                and not items[i + 3].word_head
+            ):
+                value = _call_function(unwrap_literal(items[i + 2].value), items[i + 3], value, env)
+                i += 4
+                continue
 
             # Batch setter: !+(args)
             if (

@@ -285,10 +285,24 @@ def parse_chunk_tokens(items: list) -> list[SEntry]:
             elif len(val_items) == 1:
                 entries.append(SEntry(key=key, value=_item_to_svalue(val_items[0])))
             else:
-                sub = SObject(
-                    [SEntry(key=None, value=_item_to_svalue(v)) for v in val_items]
-                )
-                entries.append(SEntry(key=key, value=sub))
+                # Recurse so $var, %Type(args) etc. within values are handled correctly
+                sub_entries = parse_chunk_tokens(val_items)
+                if len(sub_entries) == 1:
+                    entries.append(SEntry(key=key, value=sub_entries[0].value))
+                else:
+                    entries.append(SEntry(key=key, value=SObject(sub_entries)))
+        # $var reference: $ SIGIL + glued ATOM → "$varname" string
+        elif (
+            isinstance(items[i], Token)
+            and items[i].type == TokenType.SIGIL
+            and items[i].value == "$"
+            and i + 1 < len(items)
+            and isinstance(items[i + 1], Token)
+            and items[i + 1].type == TokenType.ATOM
+            and not items[i + 1].word_head
+        ):
+            entries.append(SEntry(key=None, value=f"${items[i + 1].value}"))
+            i += 2
         else:
             # Group %TypeName?(Node) + trailing setter chain as a single SObject
             # so the evaluator can treat it as a typed instantiation with setters.

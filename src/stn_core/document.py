@@ -40,6 +40,10 @@ class Document:
         return self.environment.typedefs
 
     @property
+    def functions(self) -> dict:
+        return self.environment.functions
+
+    @property
     def last_result(self) -> Value | None:
         """The last expression value produced by the most recent merge()."""
         return self._last_result

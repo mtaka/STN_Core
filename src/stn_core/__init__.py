@@ -16,6 +16,7 @@ from .values import (
     _Empty,
 )
 from .typedef import TypeDef, MemberDef
+from .funcdef import FuncDef, ParamDef as FuncParamDef
 from .sobject import SObject, SEntry
 from .errors import STNCoreError
 from .repl import STNRepl
@@ -39,4 +40,6 @@ __all__ = [
     "SEntry",
     "STNCoreError",
     "STNRepl",
+    "FuncDef",
+    "FuncParamDef",
 ]
